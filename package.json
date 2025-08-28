@@ -1,12 +1,20 @@
 {
   "name": "@alphabite/medusa-paypal",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Alphabite's Medusa Paypal Plugin",
   "author": "Alphabite (https://alphabite.io)",
   "license": "MIT",
   "files": [
     ".medusa/server"
   ],
+  "bugs": {
+    "url": "https://github.com/alphabite-dev/medusa-paypal/issues"
+  },
+  "homepage": "https://github.com/alphabite-dev/medusa-paypal#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/alphabite-dev/medusa-paypal.git"
+  },
   "exports": {
     "./package.json": "./package.json",
     "./workflows": "./.medusa/server/src/workflows/index.js",
@@ -22,18 +30,17 @@
   },
   "keywords": [
     "medusa",
-    "plugin",
-    "medusa-plugin-other",
-    "medusa-plugin",
     "medusa-v2",
+    "medusa-plugin",
+    "medusa-plugin-integration",
+    "medusa-plugin-payment",
+    "medusa-paypal-payment",
     "medusa-alphabite",
     "medusa-alphabite-plugin",
     "medusa-alphabite-paypal-plugin",
-    "medusa-plugin-payment",
-    "medusa-plugin-integration",
-    "medusa-paypal-payment",
-    "payment",
-    "paypal"
+    "medusa-paypal-plugin",
+    "medusa-paypal-integration",
+    "medusa-paypal"
   ],
   "scripts": {
     "build": "medusa plugin:build",
