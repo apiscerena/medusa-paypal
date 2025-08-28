@@ -15,9 +15,10 @@ import {
   OrderApplicationContextUserAction,
   FulfillmentType,
 } from "@paypal/paypal-server-sdk";
-import axios, { AxiosInstance } from "axios";
 import { CartAddressDTO, CartLineItemDTO } from "@medusajs/framework/types";
 import { parsePhoneNumberFromString } from "libphonenumber-js";
+import { AlphabitePaypalPluginOptions } from "../service";
+import { MedusaError } from "@medusajs/framework/utils";
 
 export interface PaypalCreateOrderInput {
   amount: number;
@@ -33,28 +34,21 @@ export class PaypalService {
   private ordersController: OrdersController;
   private paymentsController: PaymentsController;
   private authController: OAuthAuthorizationController;
-  private axios: AxiosInstance;
-  private clientIdEnv: string;
-  private clientSecretEnv: string;
-  private paypalWebhookIdEnv: string | undefined;
-  private includeShippingData: boolean | undefined;
-  private includeCustomerData: boolean | undefined;
+  private clientId: string;
+  private clientSecret: string;
+  private webhookId: string | undefined;
+  private includeShippingData: boolean;
+  private includeCustomerData: boolean;
+  private baseUrl: string;
 
   constructor({
     clientId,
     clientSecret,
     isSandbox,
-    paypalWebhookId,
+    webhookId,
     includeCustomerData,
     includeShippingData,
-  }: {
-    clientId: string;
-    clientSecret: string;
-    isSandbox: boolean;
-    paypalWebhookId?: string;
-    includeShippingData?: boolean;
-    includeCustomerData?: boolean;
-  }) {
+  }: AlphabitePaypalPluginOptions) {
     const environment = isSandbox ? Environment.Sandbox : Environment.Production;
 
     this.client = new Client({
@@ -75,118 +69,23 @@ export class PaypalService {
       },
     });
 
-    this.axios = axios.create({
-      baseURL: isSandbox ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com",
-    });
-    this.clientIdEnv = clientId;
-    this.clientSecretEnv = clientSecret;
-    this.paypalWebhookIdEnv = paypalWebhookId;
+    this.baseUrl = isSandbox ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
+
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.webhookId = webhookId;
 
     this.ordersController = new OrdersController(this.client);
     this.paymentsController = new PaymentsController(this.client);
     this.authController = new OAuthAuthorizationController(this.client);
 
-    this.includeCustomerData = includeCustomerData;
-    this.includeShippingData = includeShippingData;
-  }
-
-  private extractCustomerData() {}
-
-  private extractShippingData() {}
-
-  async createOrder({
-    amount,
-    currency,
-    sessionId,
-    shipping_info,
-    items,
-    email,
-  }: PaypalCreateOrderInput): Promise<Order> {
-    const ordersController = new OrdersController(this.client);
-
-    const paypalItems: Item[] = items
-      ? items.map((item) => ({
-          name: item.title,
-          quantity: item.quantity.toString(),
-          unitAmount: {
-            currencyCode: currency,
-            value: item.unit_price.toString(),
-          },
-        }))
-      : [];
-    const isItems = paypalItems.length > 0;
-
-    const parsed_phone_number = shipping_info?.phone ? parsePhoneNumberFromString(shipping_info.phone) : null;
-
-    const paypalShipping: ShippingDetails = shipping_info
-      ? {
-          ...(this.includeCustomerData && {
-            name: {
-              fullName: `${shipping_info.first_name} ${shipping_info.last_name}`,
-            },
-            emailAddress: email,
-            ...(parsed_phone_number && {
-              phoneNumber: {
-                countryCode: parsed_phone_number.countryCallingCode,
-                nationalNumber: parsed_phone_number.nationalNumber,
-              },
-            }),
-          }),
-          ...(this.includeShippingData && {
-            address: {
-              countryCode: shipping_info?.country_code!,
-              postalCode: shipping_info?.postal_code,
-              adminArea1: shipping_info?.province,
-              adminArea2: shipping_info?.city,
-              addressLine1: shipping_info?.address_1,
-            },
-          }),
-          type: FulfillmentType.Shipping,
-        }
-      : {};
-
-    const isShippingData = Object.keys(paypalShipping).length > 0;
-
-    const createdOrder = await ordersController.createOrder({
-      body: {
-        intent: CheckoutPaymentIntent.Capture,
-        purchaseUnits: [
-          {
-            amount: {
-              currencyCode: currency,
-              value: amount.toString(),
-              ...(isItems && {
-                breakdown: {
-                  itemTotal: {
-                    currencyCode: currency,
-                    value: amount.toString(),
-                  },
-                },
-              }),
-            },
-            customId: sessionId,
-            ...(isItems && { items: paypalItems }),
-            ...(isShippingData && { shipping: paypalShipping }),
-          },
-        ],
-        applicationContext: {
-          ...(this.includeShippingData &&
-            isShippingData && {
-              shippingPreference: OrderApplicationContextShippingPreference.SetProvidedAddress,
-            }),
-          userAction: OrderApplicationContextUserAction.PayNow,
-        },
-      },
-    });
-
-    if (!createdOrder?.result?.id) throw new Error("Failed to create order");
-
-    return createdOrder.result;
+    this.includeCustomerData = !!includeCustomerData;
+    this.includeShippingData = !!includeShippingData;
   }
 
   async getAccessToken(): Promise<string> {
     try {
-      const authorization = Buffer.from(`${this.clientIdEnv}:${this.clientSecretEnv}`).toString("base64");
+      const authorization = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString("base64");
 
       const authRes = await this.authController.requestToken({
         authorization: `Basic ${authorization}`,
@@ -202,12 +101,69 @@ export class PaypalService {
     }
   }
 
-  async authorizeOrder(id: string): Promise<OrderAuthorizeResponse> {
-    const authorizedOrder = await this.ordersController.authorizeOrder({
-      id,
+  async createOrder({
+    amount,
+    currency,
+    sessionId,
+    shipping_info,
+    items,
+    email,
+  }: PaypalCreateOrderInput): Promise<Order> {
+    const ordersController = new OrdersController(this.client);
+
+    const paypalItems: Item[] =
+      items?.map((item) => ({
+        name: item.title,
+        quantity: item.quantity.toString(),
+        unitAmount: {
+          currencyCode: currency,
+          value: item.unit_price.toString(),
+        },
+      })) || [];
+
+    const hasItems = paypalItems.length > 0;
+
+    const shippingData: ShippingDetails | false = !!shipping_info && {
+      ...(this.includeCustomerData && this.mapCustomerData({ email, shipping_info })),
+      ...(this.includeShippingData && this.mapShippingData(shipping_info)),
+      type: FulfillmentType.Shipping,
+    };
+
+    const createdOrder = await ordersController.createOrder({
+      body: {
+        intent: CheckoutPaymentIntent.Capture,
+        purchaseUnits: [
+          {
+            amount: {
+              currencyCode: currency,
+              value: amount.toString(),
+              ...(hasItems && {
+                breakdown: {
+                  itemTotal: {
+                    currencyCode: currency,
+                    value: amount.toString(),
+                  },
+                },
+              }),
+            },
+            customId: sessionId,
+            ...(hasItems && { items: paypalItems }),
+            ...(shippingData && { shipping: shippingData }),
+          },
+        ],
+        applicationContext: {
+          ...(this.includeShippingData &&
+            shippingData && {
+              shippingPreference: OrderApplicationContextShippingPreference.SetProvidedAddress,
+            }),
+          userAction: OrderApplicationContextUserAction.PayNow,
+        },
+      },
     });
 
-    return authorizedOrder.result;
+    if (!createdOrder?.result?.id) throw new Error("Failed to create order");
+
+    return createdOrder.result;
   }
 
   async captureOrder(id: string): Promise<Order> {
@@ -216,6 +172,22 @@ export class PaypalService {
     });
 
     return capturedOrder.result;
+  }
+
+  async retrieveOrder(id: string): Promise<Order> {
+    const orderDetails = await this.ordersController.getOrder({
+      id,
+    });
+
+    return orderDetails.result;
+  }
+
+  async authorizeOrder(id: string): Promise<OrderAuthorizeResponse> {
+    const authorizedOrder = await this.ordersController.authorizeOrder({
+      id,
+    });
+
+    return authorizedOrder.result;
   }
 
   async refundPayment(captureIds: string[]): Promise<Refund[]> {
@@ -232,14 +204,6 @@ export class PaypalService {
     return refunds;
   }
 
-  async getOrderDetails(id: string): Promise<Order> {
-    const orderDetails = await this.ordersController.getOrder({
-      id,
-    });
-
-    return orderDetails.result;
-  }
-
   public verifyWebhook = async ({
     headers,
     body,
@@ -247,31 +211,84 @@ export class PaypalService {
     headers: Record<string, string>;
     body: object;
   }): Promise<{ body: object; status: "SUCCESS" | "FAILURE" }> => {
+    if (!this.webhookId) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Webhook ID is not set");
+    }
+
     const accessToken = await this.getAccessToken();
 
-    const verifyWebhookRes = await this.axios.post(
-      "/v1/notifications/verify-webhook-signature",
-      {
+    const verifyWebhookRes = await fetch(`${this.baseUrl}/v1/notifications/verify-webhook-signature`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
         auth_algo: headers["paypal-auth-algo"],
         cert_url: headers["paypal-cert-url"],
         transmission_id: headers["paypal-transmission-id"],
         transmission_sig: headers["paypal-transmission-sig"],
         transmission_time: headers["paypal-transmission-time"],
-        webhook_id: this.paypalWebhookIdEnv || "",
+        webhook_id: this.webhookId,
         webhook_event: body,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+      }),
+    });
 
-    if (verifyWebhookRes.data.verification_status !== "SUCCESS") {
+    if (!verifyWebhookRes.ok) {
+      throw new Error(`Failed to verify webhook signature: ${verifyWebhookRes.statusText}`);
+    }
+
+    const verifyWebhookData = await verifyWebhookRes.json();
+
+    if (verifyWebhookData.verification_status !== "SUCCESS") {
       throw new Error("Failed to verify webhook signature");
     }
 
-    return { status: verifyWebhookRes.data.verification_status, body };
+    return { status: verifyWebhookData.verification_status, body };
   };
+
+  private mapCustomerData({
+    email,
+    shipping_info,
+  }: {
+    email?: string;
+    shipping_info: PaypalCreateOrderInput["shipping_info"];
+  }): Pick<ShippingDetails, "name" | "emailAddress" | "phoneNumber"> | undefined {
+    if (!this.includeCustomerData || !shipping_info) {
+      return undefined;
+    }
+
+    const parsedPhoneNumber = !!shipping_info?.phone && parsePhoneNumberFromString(shipping_info.phone);
+
+    return {
+      name: {
+        fullName: `${shipping_info.first_name} ${shipping_info.last_name}`,
+      },
+      ...(email && { emailAddress: email }),
+      ...(parsedPhoneNumber && {
+        phoneNumber: {
+          countryCode: parsedPhoneNumber.countryCallingCode,
+          nationalNumber: parsedPhoneNumber.nationalNumber,
+        },
+      }),
+    };
+  }
+
+  private mapShippingData(
+    shipping_info: PaypalCreateOrderInput["shipping_info"]
+  ): Pick<ShippingDetails, "address"> | undefined {
+    if (!this.includeShippingData || !shipping_info || !shipping_info.country_code) {
+      return undefined;
+    }
+
+    return {
+      address: {
+        countryCode: shipping_info.country_code,
+        postalCode: shipping_info.postal_code,
+        adminArea1: shipping_info.province,
+        adminArea2: shipping_info.city,
+        addressLine1: shipping_info.address_1,
+      },
+    };
+  }
 }
