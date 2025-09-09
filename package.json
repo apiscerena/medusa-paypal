@@ -1,19 +1,19 @@
 {
-  "name": "@alphabite/medusa-paypal",
-  "version": "0.2.1",
-  "description": "Alphabite's Medusa Paypal Plugin",
-  "author": "Alphabite (https://alphabite.io)",
+  "name": "@apiscerena/medusa-paypal-authorize",
+  "version": "0.2.2",
+  "description": "Medusa PayPal Plugin with Authorize Intent (Fork of @alphabite/medusa-paypal)",
+  "author": "apiscerena",
   "license": "MIT",
   "files": [
     ".medusa/server"
   ],
   "bugs": {
-    "url": "https://github.com/alphabite-dev/medusa-paypal/issues"
+    "url": "https://github.com/apiscerena/medusa-paypal/issues"
   },
-  "homepage": "https://github.com/alphabite-dev/medusa-paypal#readme",
+  "homepage": "https://github.com/apiscerena/medusa-paypal#readme",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/alphabite-dev/medusa-paypal.git"
+    "url": "git+ssh://git@github.com/apiscerena/medusa-paypal.git"
   },
   "exports": {
     "./package.json": "./package.json",
