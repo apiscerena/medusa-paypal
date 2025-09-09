@@ -131,7 +131,7 @@ export class PaypalService {
 
     const createdOrder = await ordersController.createOrder({
       body: {
-        intent: CheckoutPaymentIntent.Capture,
+        intent: CheckoutPaymentIntent.Authorize,
         purchaseUnits: [
           {
             amount: {

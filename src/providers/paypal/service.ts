@@ -136,15 +136,15 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
       );
     }
 
-    const isAuthorized = paypalData?.purchaseUnits?.[0].payments?.captures?.[0]?.status === CaptureStatus.Completed;
+    const isAuthorized = paypalData?.purchaseUnits?.[0].payments?.authorizations?.[0]?.status === "CREATED";
 
     if (!isAuthorized) {
       try {
-        paypalData = await this.client.captureOrder(orderId);
+        paypalData = await this.client.authorizeOrder(orderId);
       } catch (err) {
         const body = JSON.parse(err?.body || "{}");
 
-        const captureData = body?.purchase_units?.[0]?.payments?.captures?.[0];
+        const authData = body?.purchase_units?.[0]?.payments?.authorizations?.[0];
 
         const newOrder = await this.client.createOrder({
           amount: Number(amount),
@@ -155,7 +155,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
           email: data?.email,
         });
 
-        if (!captureData) {
+        if (!authData) {
           const error: PaypalPaymentError = {
             code: "404",
             message: "Payment declined. Please try again or use a different card.",
@@ -172,8 +172,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
           };
         }
 
-        const paymentStatus = captureData?.status || CaptureStatus.Declined;
-        const processorResponse = captureData?.processorResponse;
+        const paymentStatus = authData?.status || "DECLINED";
+        const processorResponse = authData?.processorResponse;
 
         const { error = undefined } = this.checkPaymentStatus(paymentStatus, processorResponse);
 
