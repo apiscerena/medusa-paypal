@@ -1,7 +1,7 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework";
 import { PostStorePaypalPaymentType } from "./validators";
-import { PaypalService } from "@alphabite/medusa-paypal/providers/paypal/paypal-core";
-import { AlphabitePaypalPluginOptions } from "src/providers/paypal/service";
+import { PaypalService } from "../../../../providers/paypal/paypal-core";
+import { AlphabitePaypalPluginOptions } from "../../../../providers/paypal/service";
 
 interface PaymentProvidersProps {
   resolve: string;
