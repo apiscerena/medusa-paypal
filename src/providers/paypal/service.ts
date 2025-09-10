@@ -1,4 +1,4 @@
-import { AbstractPaymentProvider, MedusaError, PaymentSessionStatus } from "@medusajs/framework/utils";
+import { AbstractPaymentProvider, MedusaError, PaymentSessionStatus, PaymentActions } from "@medusajs/framework/utils";
 import {
   AuthorizePaymentInput,
   AuthorizePaymentOutput,
@@ -18,6 +18,7 @@ import {
   UpdatePaymentInput,
   UpdatePaymentOutput,
   WebhookActionResult,
+  ProviderWebhookPayload,
 } from "@medusajs/framework/types";
 import { CaptureStatus, Order } from "@paypal/paypal-server-sdk";
 import { WebhookPayload } from "./types";
@@ -84,10 +85,12 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "Payment data is required");
       }
 
-      if (!input.data.id) {
+      const orderId = input.data.id as string;
+      if (!orderId) {
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "PayPal order ID is required to capture payment");
       }
 
+      // Check if already captured
       if (input.data.status === PaymentSessionStatus.CAPTURED || input.data.status === "COMPLETED") {
         return {
           data: {
@@ -98,21 +101,62 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         };
       }
 
-      const id = input.data.id as string;
-
-      await this.client.captureOrder(id);
+      // Get the latest order details to find the authorization ID
+      const orderData = await this.client.retrieveOrder(orderId);
+      const authorizationData = orderData?.purchaseUnits?.[0].payments?.authorizations?.[0];
+      
+      let capturedOrder;
+      
+      if (authorizationData && authorizationData.id) {
+        // For authorized orders, capture the specific authorization
+        this.logger.info(`Capturing authorization ${authorizationData.id} for order ${orderId}`);
+        
+        // We need to call the capture authorization endpoint
+        // This requires a different API call than captureOrder
+        const captureResponse = await this.captureAuthorization(authorizationData.id);
+        capturedOrder = orderData; // Keep the original order data
+      } else {
+        // Fallback to order-level capture (for direct capture intent)
+        this.logger.info(`Capturing order ${orderId} directly`);
+        capturedOrder = await this.client.captureOrder(orderId);
+      }
 
       return {
         data: {
           ...input.data,
+          ...capturedOrder,
           status: PaymentSessionStatus.CAPTURED,
           captured_at: new Date().toISOString(),
         },
       };
     } catch (error) {
       this.logger.error("PayPal capture payment error:", error);
-
       throw new MedusaError(MedusaError.Types.INVALID_DATA, "Failed to capture PayPal payment");
+    }
+  }
+  
+  private async captureAuthorization(authorizationId: string): Promise<any> {
+    try {
+      const accessToken = await this.client.getAccessToken();
+      const baseUrl = this.options.isSandbox ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
+      const response = await fetch(`${baseUrl}/v2/payments/authorizations/${authorizationId}/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({}), // Empty body for capture
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`Failed to capture authorization: ${error.message || response.statusText}`);
+      }
+      
+      return await response.json();
+    } catch (error) {
+      this.logger.error("Failed to capture PayPal authorization:", error);
+      throw error;
     }
   }
 
@@ -122,7 +166,6 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     }
 
     const data = input.data as unknown as AuthorizePaymentInputData | undefined;
-
     let paypalData = input.data as Order | undefined;
 
     const amount = input.data.amount as number;
@@ -132,94 +175,117 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     if (!orderId || !amount || !currencyCode) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        "PayPal order ID, Amount or Currency is missing, can not capture order."
+        "PayPal order ID, Amount or Currency is missing, can not authorize order."
       );
     }
 
-    const isAuthorized = paypalData?.purchaseUnits?.[0].payments?.authorizations?.[0]?.status === "CREATED";
+    // Get the latest order status from PayPal
+    try {
+      paypalData = await this.client.retrieveOrder(orderId);
+    } catch (error) {
+      this.logger.error("Failed to retrieve PayPal order:", error);
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Failed to retrieve PayPal order status"
+      );
+    }
 
-    if (!isAuthorized) {
+    const orderStatus = paypalData?.status;
+    const authorizationData = paypalData?.purchaseUnits?.[0].payments?.authorizations?.[0];
+    const captureData = paypalData?.purchaseUnits?.[0].payments?.captures?.[0];
+
+    // PayPal order flow:
+    // 1. CREATED -> order created but not approved by user
+    // 2. APPROVED -> user approved payment in PayPal
+    // 3. COMPLETED -> payment has been captured (we should avoid this in authorize)
+    
+    // If order is approved by user, authorize it
+    if (orderStatus === "APPROVED") {
       try {
-        paypalData = await this.client.authorizeOrder(orderId);
-      } catch (err) {
-        const body = JSON.parse(err?.body || "{}");
-
-        const authData = body?.purchase_units?.[0]?.payments?.authorizations?.[0];
-
-        const newOrder = await this.client.createOrder({
-          amount: Number(amount),
-          currency: currencyCode,
-          sessionId: input.context?.idempotency_key,
-          items: data?.items,
-          shipping_info: data?.shipping_info,
-          email: data?.email,
-        });
-
-        if (!authData) {
-          const error: PaypalPaymentError = {
-            code: "404",
-            message: "Payment declined. Please try again or use a different card.",
-            retryable: true,
-          };
-
+        // Authorize the payment (this should create an authorization, not capture)
+        const authorizedOrder = await this.client.authorizeOrder(orderId);
+        
+        // Check if authorization was successful
+        const newAuthData = authorizedOrder?.purchaseUnits?.[0].payments?.authorizations?.[0];
+        
+        // Authorization should have status "CREATED" for a successful authorization
+        // "CAPTURED" would mean it was auto-captured, which we want to avoid
+        if (newAuthData && newAuthData.status === "CREATED") {
           return {
-            status: PaymentSessionStatus.PENDING,
-            data: {
-              ...input.data,
-              ...newOrder,
-              error,
-            },
+            data: authorizedOrder as unknown as Record<string, unknown>,
+            status: PaymentSessionStatus.AUTHORIZED,  // Return AUTHORIZED, not CAPTURED
           };
         }
-
-        const paymentStatus = authData?.status || "DECLINED";
-        const processorResponse = authData?.processorResponse;
-
-        const { error = undefined } = this.checkPaymentStatus(paymentStatus, processorResponse);
-
+        
+        // If somehow it was captured instead of authorized, still return as authorized
+        // to prevent immediate fund transfer - this needs manual review
+        if (newAuthData && newAuthData.status === "CAPTURED") {
+          this.logger.warn("PayPal order was auto-captured instead of authorized. Check PayPal account settings.");
+          return {
+            data: authorizedOrder as unknown as Record<string, unknown>,
+            status: PaymentSessionStatus.AUTHORIZED,  // Still return AUTHORIZED to prevent issues
+          };
+        }
+        
+        // Check if there's capture data (shouldn't happen with authorize intent)
+        const captureData = authorizedOrder?.purchaseUnits?.[0].payments?.captures?.[0];
+        if (captureData) {
+          this.logger.warn("PayPal returned capture data in authorize call. Check PayPal account settings.");
+          return {
+            data: authorizedOrder as unknown as Record<string, unknown>,
+            status: PaymentSessionStatus.AUTHORIZED,  // Still return AUTHORIZED
+          };
+        }
+        
+        // If authorization failed, return error
         return {
-          status: PaymentSessionStatus.PENDING,
-          data: {
-            ...input.data,
-            ...newOrder,
-            error,
-          },
+          data: authorizedOrder as unknown as Record<string, unknown>,
+          status: PaymentSessionStatus.ERROR,
         };
-      }
-
-      const captureData = paypalData.purchaseUnits?.[0].payments?.captures?.[0];
-
-      const paymentStatus = captureData?.status || CaptureStatus.Declined;
-      const processorResponse = captureData?.processorResponse;
-
-      const { status, error = undefined } = this.checkPaymentStatus(paymentStatus, processorResponse);
-
-      if (status === CaptureStatus.Declined) {
-        const newOrder = await this.client.createOrder({
-          amount: Number(captureData?.amount?.value),
-          currency: captureData?.amount?.currencyCode!,
-          sessionId: input.context?.idempotency_key,
-          items: data?.items,
-          shipping_info: data?.shipping_info,
-          email: data?.email,
-        });
-
-        return {
-          status: PaymentSessionStatus.PENDING,
-          data: {
-            ...input.data,
-            ...newOrder,
-            error,
-          },
-        };
+      } catch (error) {
+        this.logger.error("Failed to authorize PayPal payment:", error);
+        
+        // Parse error to get more details
+        const errorBody = error?.body ? JSON.parse(error.body) : {};
+        const errorMessage = errorBody?.message || "Failed to authorize payment";
+        
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `PayPal authorization failed: ${errorMessage}`
+        );
       }
     }
 
+    // If we already have authorization data, return as authorized
+    if (authorizationData && authorizationData.status === "CREATED") {
+      return {
+        data: paypalData as unknown as Record<string, unknown>,
+        status: PaymentSessionStatus.AUTHORIZED,
+      };
+    }
+    
+    // Only return CAPTURED if this is being called on an already captured payment
+    // This shouldn't happen in normal flow, but handle it gracefully
+    if (orderStatus === "COMPLETED" || captureData?.status === "COMPLETED") {
+      this.logger.warn("Authorize called on already captured PayPal order");
+      return {
+        data: paypalData as unknown as Record<string, unknown>,
+        status: PaymentSessionStatus.CAPTURED,
+      };
+    }
+    
+    // If order is not approved yet, return as pending
+    if (orderStatus === "CREATED") {
+      return {
+        data: paypalData as unknown as Record<string, unknown>,
+        status: PaymentSessionStatus.PENDING,
+      };
+    }
+
+    // For any other status, return as error
     return {
-      data: {
-        ...paypalData,
-      },
-      status: PaymentSessionStatus.AUTHORIZED,
+      data: paypalData as unknown as Record<string, unknown>,
+      status: PaymentSessionStatus.ERROR,
     };
   }
 
@@ -393,33 +459,163 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "Not implemented");
   }
 
-  async getWebhookActionAndData(payload: WebhookPayload): Promise<WebhookActionResult> {
+  /**
+   * Constructs and validates a PayPal webhook event
+   * Similar to Stripe's constructWebhookEvent method
+   */
+  constructWebhookEvent(data: ProviderWebhookPayload["payload"]): any {
+    // Extract PayPal-specific headers
+    const headers = data.headers as Record<string, string>;
+    const requiredHeaders = [
+      "paypal-auth-algo",
+      "paypal-cert-url", 
+      "paypal-transmission-id",
+      "paypal-transmission-sig",
+      "paypal-transmission-time"
+    ];
+
+    // Validate required headers are present
+    for (const header of requiredHeaders) {
+      if (!headers[header]) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `Missing required PayPal webhook header: ${header}`
+        );
+      }
+    }
+
+    // Parse the webhook body
+    let webhookEvent: any;
     try {
-      const { data, headers } = payload;
+      webhookEvent = typeof data.rawData === "string" 
+        ? JSON.parse(data.rawData)
+        : data.rawData;
+    } catch (error) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Invalid webhook payload format"
+      );
+    }
 
-      await this.client.verifyWebhook({ headers, body: data });
+    // Return the validated webhook data with headers for verification
+    return {
+      headers,
+      body: webhookEvent
+    };
+  }
 
-      switch (data.event_type) {
+  async getWebhookActionAndData(payload: ProviderWebhookPayload["payload"]): Promise<WebhookActionResult> {
+    try {
+      // Construct and validate the webhook event
+      const event = this.constructWebhookEvent(payload);
+      
+      // Verify webhook signature with PayPal
+      await this.client.verifyWebhook({ 
+        headers: event.headers, 
+        body: event.body 
+      });
+
+      // Extract event details
+      const eventType = event.body.event_type;
+      const resource = event.body.resource;
+      
+      // Get session ID and amount from resource
+      const sessionId = resource?.custom_id || resource?.invoice_id;
+      const amount = resource?.amount?.value ? Number(resource.amount.value) : 0;
+
+      // Map PayPal events to Medusa PaymentActions
+      switch (eventType) {
         case "PAYMENT.CAPTURE.COMPLETED":
           return {
-            action: "captured",
+            action: PaymentActions.SUCCESSFUL,
             data: {
-              session_id: data.resource.custom_id,
-              amount: Number(data.resource.amount.value),
+              session_id: sessionId,
+              amount: amount,
             },
           };
-        default:
+          
+        case "PAYMENT.CAPTURE.PENDING":
           return {
-            action: "not_supported",
+            action: PaymentActions.PENDING,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "PAYMENT.CAPTURE.DENIED":
+        case "PAYMENT.CAPTURE.FAILED":
+          return {
+            action: PaymentActions.FAILED,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "PAYMENT.AUTHORIZATION.CREATED":
+          return {
+            action: PaymentActions.AUTHORIZED,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "PAYMENT.AUTHORIZATION.VOIDED":
+          return {
+            action: PaymentActions.CANCELED,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "CHECKOUT.ORDER.APPROVED":
+          // Order approved by user but needs capture
+          return {
+            action: PaymentActions.REQUIRES_MORE,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "CHECKOUT.PAYMENT-APPROVAL.REVERSED":
+          // Payment was reversed after approval
+          return {
+            action: PaymentActions.FAILED,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        case "PAYMENT.CAPTURE.REFUNDED":
+        case "PAYMENT.REFUND.COMPLETED":
+          // Handle refund events - Note: PaymentActions doesn't have REFUNDED, 
+          // so we use SUCCESSFUL for completed refunds
+          return {
+            action: PaymentActions.SUCCESSFUL,
+            data: {
+              session_id: sessionId,
+              amount: amount,
+            },
+          };
+          
+        default:
+          this.logger.warn(`Unsupported PayPal webhook event type: ${eventType}`);
+          return {
+            action: PaymentActions.NOT_SUPPORTED,
           };
       }
-    } catch (e) {
+    } catch (error) {
+      this.logger.error("PayPal webhook processing error:", error);
+      
+      // If we can't verify the webhook, return failed
+      // Note: We can't include error details in data, so just log them
       return {
-        action: "failed",
-        data: {
-          session_id: payload.data.resource.custom_id,
-          amount: Number(payload.data.resource.amount.value),
-        },
+        action: PaymentActions.FAILED,
       };
     }
   }
