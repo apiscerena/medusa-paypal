@@ -1,6 +1,6 @@
 {
   "name": "medusa-paypal-authorize",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Medusa PayPal Plugin with Authorize Intent (Fork of @alphabite/medusa-paypal)",
   "author": "apiscerena",
   "license": "MIT",

@@ -111,17 +111,26 @@ export class PaypalService {
   }: PaypalCreateOrderInput): Promise<Order> {
     const ordersController = new OrdersController(this.client);
 
+    // Format amount to 2 decimal places as required by PayPal
+    const formattedAmount = this.formatAmount(amount);
+
     const paypalItems: Item[] =
       items?.map((item) => ({
         name: item.title,
         quantity: item.quantity.toString(),
         unitAmount: {
           currencyCode: currency,
-          value: item.unit_price.toString(),
+          value: this.formatAmount(Number(item.unit_price)),
         },
       })) || [];
 
     const hasItems = paypalItems.length > 0;
+
+    // Calculate item total if items are present
+    const itemTotal = hasItems && items
+      ? items.reduce((sum, item) => sum + (Number(item.unit_price) * Number(item.quantity)), 0)
+      : amount;
+    const formattedItemTotal = this.formatAmount(itemTotal);
 
     const shippingData: ShippingDetails | false = !!shipping_info && {
       ...(this.includeCustomerData && this.mapCustomerData({ email, shipping_info })),
@@ -136,12 +145,12 @@ export class PaypalService {
           {
             amount: {
               currencyCode: currency,
-              value: amount.toString(),
+              value: formattedAmount,
               ...(hasItems && {
                 breakdown: {
                   itemTotal: {
                     currencyCode: currency,
-                    value: amount.toString(),
+                    value: formattedItemTotal,
                   },
                 },
               }),
@@ -290,5 +299,17 @@ export class PaypalService {
         addressLine1: shipping_info.address_1,
       },
     };
+  }
+
+  /**
+   * Formats an amount to 2 decimal places as required by PayPal
+   * @param amount - The amount to format
+   * @returns The formatted amount as a string with 2 decimal places
+   */
+  private formatAmount(amount: number): string {
+    // Round to 2 decimal places to avoid floating point precision issues
+    const rounded = Math.round(amount * 100) / 100;
+    // Format to exactly 2 decimal places
+    return rounded.toFixed(2);
   }
 }
