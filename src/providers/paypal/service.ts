@@ -89,6 +89,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
       if (!orderId) {
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "PayPal order ID is required to capture payment");
       }
+      
+      // Validate order ID format
+      if (!this.validatePayPalOrderId(orderId)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal order ID format");
+      }
 
       // Check if already captured
       if (input.data.status === PaymentSessionStatus.CAPTURED || input.data.status === "COMPLETED") {
@@ -137,9 +142,29 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
   
   private async captureAuthorization(authorizationId: string): Promise<any> {
     try {
+      // Validate authorization ID format (PayPal IDs are alphanumeric with specific length)
+      if (!authorizationId || typeof authorizationId !== 'string') {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          "Invalid authorization ID"
+        );
+      }
+      
+      // PayPal authorization IDs are typically 17-20 alphanumeric characters
+      const authIdPattern = /^[A-Z0-9]{17,20}$/;
+      if (!authIdPattern.test(authorizationId)) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          "Invalid PayPal authorization ID format"
+        );
+      }
+      
       const accessToken = await this.client.getAccessToken();
       const baseUrl = this.options.isSandbox ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
-      const response = await fetch(`${baseUrl}/v2/payments/authorizations/${authorizationId}/capture`, {
+      
+      // Use encodeURIComponent to prevent injection
+      const sanitizedAuthId = encodeURIComponent(authorizationId);
+      const response = await fetch(`${baseUrl}/v2/payments/authorizations/${sanitizedAuthId}/capture`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -363,11 +388,23 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         ?.flatMap((item) => item?.payments?.captures?.map((capture) => capture.id))
         .filter((id) => id !== undefined);
 
-      if (!orderId || !captureIds) {
+      if (!orderId || !captureIds || captureIds.length === 0) {
         throw new MedusaError(
           MedusaError.Types.INVALID_DATA,
-          "Refund payment failed! PayPal order ID and capture ID is required to cancel payment"
+          "Refund payment failed! PayPal order ID and capture ID is required to refund payment"
         );
+      }
+      
+      // Validate order ID
+      if (!this.validatePayPalOrderId(orderId)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal order ID format");
+      }
+      
+      // Validate all capture IDs
+      for (const captureId of captureIds) {
+        if (!this.validatePayPalCaptureId(captureId)) {
+          throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal capture ID format");
+        }
       }
 
       await this.client.refundPayment(captureIds);
@@ -423,7 +460,12 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
       const order_id = input.data["id"] as string;
 
       if (!order_id) {
-        throw new MedusaError(MedusaError.Types.INVALID_DATA, "PayPal order ID is required to cancel payment");
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "PayPal order ID is required to get payment status");
+      }
+      
+      // Validate order ID format
+      if (!this.validatePayPalOrderId(order_id)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal order ID format");
       }
 
       const order = await this.client.retrieveOrder(order_id);
@@ -444,6 +486,10 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
   async retrievePayment(input: Record<string, unknown>) {
     try {
       const id = input["id"] as string;
+      
+      if (!id || !this.validatePayPalOrderId(id)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal order ID");
+      }
 
       const res = await this.client.retrieveOrder(id);
       return {
@@ -707,5 +753,30 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
           },
         };
     }
+  }
+  
+  /**
+   * Validates PayPal order ID format
+   * PayPal order IDs are typically 17 alphanumeric characters
+   */
+  private validatePayPalOrderId(orderId: string): boolean {
+    if (!orderId || typeof orderId !== 'string') {
+      return false;
+    }
+    // PayPal order IDs are typically 17 alphanumeric characters
+    const orderIdPattern = /^[A-Z0-9]{17}$/;
+    return orderIdPattern.test(orderId);
+  }
+  
+  /**
+   * Validates PayPal capture ID format
+   * PayPal capture IDs are typically 17-20 alphanumeric characters
+   */
+  private validatePayPalCaptureId(captureId: string): boolean {
+    if (!captureId || typeof captureId !== 'string') {
+      return false;
+    }
+    const captureIdPattern = /^[A-Z0-9]{17,20}$/;
+    return captureIdPattern.test(captureId);
   }
 }
