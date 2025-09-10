@@ -176,11 +176,51 @@ export class PaypalService {
   }
 
   async captureOrder(id: string): Promise<Order> {
-    const capturedOrder = await this.ordersController.captureOrder({
-      id,
+    // For AUTHORIZE intent, we need to capture the authorization, not the order
+    const orderDetails = await this.retrieveOrder(id);
+    
+    // Log current order status for debugging
+    console.log(`[PayPal] Order ${id} status: ${orderDetails.status}`);
+    
+    // Check if order has authorization that can be captured
+    const authorization = orderDetails.purchaseUnits?.[0]?.payments?.authorizations?.[0];
+    
+    if (authorization && authorization.id && authorization.status === "CREATED") {
+      console.log(`[PayPal] Capturing authorization ${authorization.id} for order ${id}`);
+      // Capture the authorization using the correct SDK method
+      const capturedPayment = await this.captureAuthorization(authorization.id);
+      
+      // Get updated order details after capture
+      const updatedOrder = await this.retrieveOrder(id);
+      return updatedOrder;
+    }
+    
+    // Check if already captured
+    const capture = orderDetails.purchaseUnits?.[0]?.payments?.captures?.[0];
+    if (capture && capture.status === "COMPLETED") {
+      console.log(`[PayPal] Order ${id} already has completed capture`);
+      return orderDetails;
+    }
+    
+    // For CAPTURE intent orders (not AUTHORIZE), use direct capture
+    if (orderDetails.intent === "CAPTURE" && orderDetails.status === "APPROVED") {
+      console.log(`[PayPal] Direct capture for CAPTURE intent order ${id}`);
+      const capturedOrder = await this.ordersController.captureOrder({
+        id,
+      });
+      return capturedOrder.result;
+    }
+    
+    throw new Error(`Cannot capture order ${id} in status ${orderDetails.status} with intent ${orderDetails.intent}`);
+  }
+
+  async captureAuthorization(authorizationId: string): Promise<any> {
+    // Use the correct PayPal SDK method for capturing authorizations
+    const capturedPayment = await this.paymentsController.captureAuthorizedPayment({
+      authorizationId,
     });
 
-    return capturedOrder.result;
+    return capturedPayment.result;
   }
 
   async retrieveOrder(id: string): Promise<Order> {
