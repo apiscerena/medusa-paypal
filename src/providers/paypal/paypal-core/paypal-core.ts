@@ -176,51 +176,96 @@ export class PaypalService {
   }
 
   async captureOrder(id: string): Promise<Order> {
-    // For AUTHORIZE intent, we need to capture the authorization, not the order
-    const orderDetails = await this.retrieveOrder(id);
-    
-    // Log current order status for debugging
-    console.log(`[PayPal] Order ${id} status: ${orderDetails.status}`);
-    
-    // Check if order has authorization that can be captured
-    const authorization = orderDetails.purchaseUnits?.[0]?.payments?.authorizations?.[0];
-    
-    if (authorization && authorization.id && authorization.status === "CREATED") {
-      console.log(`[PayPal] Capturing authorization ${authorization.id} for order ${id}`);
-      // Capture the authorization using the correct SDK method
-      const capturedPayment = await this.captureAuthorization(authorization.id);
+    try {
+      // For AUTHORIZE intent, we need to capture the authorization, not the order
+      const orderDetails = await this.retrieveOrder(id);
       
-      // Get updated order details after capture
-      const updatedOrder = await this.retrieveOrder(id);
-      return updatedOrder;
+      // Log current order status for debugging
+      console.log(`[PayPal] Order ${id} status: ${orderDetails.status}`);
+      console.log(`[PayPal] Order intent: ${orderDetails.intent}`);
+      
+      // Check if order has authorization that can be captured
+      const authorization = orderDetails.purchaseUnits?.[0]?.payments?.authorizations?.[0];
+      
+      if (authorization) {
+        console.log(`[PayPal] Found authorization:`, {
+          id: authorization.id,
+          status: authorization.status,
+          amount: authorization.amount,
+        });
+        
+        if (authorization.id && authorization.status === "CREATED") {
+          console.log(`[PayPal] Capturing authorization ${authorization.id} for order ${id}`);
+          
+          try {
+            // Capture the authorization using the correct SDK method
+            const capturedPayment = await this.captureAuthorization(authorization.id);
+            
+            console.log(`[PayPal] Authorization captured successfully`);
+            
+            // Get updated order details after capture
+            const updatedOrder = await this.retrieveOrder(id);
+            console.log(`[PayPal] Updated order status: ${updatedOrder.status}`);
+            
+            return updatedOrder;
+          } catch (captureError: any) {
+            console.error(`[PayPal] Failed to capture authorization:`, captureError);
+            // Re-throw with more context
+            throw new Error(`Failed to capture PayPal authorization ${authorization.id}: ${captureError.message}`);
+          }
+        } else {
+          console.log(`[PayPal] Authorization status is ${authorization.status}, cannot capture`);
+        }
+      }
+      
+      // Check if already captured
+      const capture = orderDetails.purchaseUnits?.[0]?.payments?.captures?.[0];
+      if (capture && capture.status === "COMPLETED") {
+        console.log(`[PayPal] Order ${id} already has completed capture:`, {
+          captureId: capture.id,
+          amount: capture.amount,
+          capturedAt: capture.createTime,
+        });
+        return orderDetails;
+      }
+      
+      // For CAPTURE intent orders (not AUTHORIZE), use direct capture
+      if (orderDetails.intent === "CAPTURE" && orderDetails.status === "APPROVED") {
+        console.log(`[PayPal] Direct capture for CAPTURE intent order ${id}`);
+        const capturedOrder = await this.ordersController.captureOrder({
+          id,
+        });
+        return capturedOrder.result;
+      }
+      
+      throw new Error(`Cannot capture order ${id} in status ${orderDetails.status} with intent ${orderDetails.intent}`);
+    } catch (error: any) {
+      console.error(`[PayPal] Error in captureOrder:`, error);
+      throw error;
     }
-    
-    // Check if already captured
-    const capture = orderDetails.purchaseUnits?.[0]?.payments?.captures?.[0];
-    if (capture && capture.status === "COMPLETED") {
-      console.log(`[PayPal] Order ${id} already has completed capture`);
-      return orderDetails;
-    }
-    
-    // For CAPTURE intent orders (not AUTHORIZE), use direct capture
-    if (orderDetails.intent === "CAPTURE" && orderDetails.status === "APPROVED") {
-      console.log(`[PayPal] Direct capture for CAPTURE intent order ${id}`);
-      const capturedOrder = await this.ordersController.captureOrder({
-        id,
-      });
-      return capturedOrder.result;
-    }
-    
-    throw new Error(`Cannot capture order ${id} in status ${orderDetails.status} with intent ${orderDetails.intent}`);
   }
 
   async captureAuthorization(authorizationId: string): Promise<any> {
-    // Use the correct PayPal SDK method for capturing authorizations
-    const capturedPayment = await this.paymentsController.captureAuthorizedPayment({
-      authorizationId,
-    });
+    try {
+      console.log(`[PayPal] Attempting to capture authorization: ${authorizationId}`);
+      
+      // Use the correct PayPal SDK method for capturing authorizations
+      const capturedPayment = await this.paymentsController.captureAuthorizedPayment({
+        authorizationId,
+      });
 
-    return capturedPayment.result;
+      console.log(`[PayPal] Capture response:`, JSON.stringify(capturedPayment.result, null, 2));
+      
+      if (!capturedPayment.result) {
+        throw new Error("No result returned from PayPal capture API");
+      }
+      
+      return capturedPayment.result;
+    } catch (error: any) {
+      console.error(`[PayPal] Failed to capture authorization ${authorizationId}:`, error);
+      console.error(`[PayPal] Error details:`, error.response?.data || error.message);
+      throw error;
+    }
   }
 
   async retrieveOrder(id: string): Promise<Order> {

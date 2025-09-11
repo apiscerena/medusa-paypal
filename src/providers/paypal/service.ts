@@ -95,67 +95,129 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid PayPal order ID format");
       }
 
+      this.logger.info(`[PayPal Capture] Starting capture for order ${orderId}`);
+
       // First check the actual status from PayPal
       const orderDetails = await this.client.retrieveOrder(orderId);
       
-      this.logger.info(`PayPal order ${orderId} current status: ${orderDetails.status}`);
+      this.logger.info(`[PayPal Capture] Order ${orderId} current status: ${orderDetails.status}`);
+      this.logger.info(`[PayPal Capture] Order intent: ${orderDetails.intent}`);
       
       // Check if already captured on PayPal's side
       if (orderDetails.status === "COMPLETED") {
-        this.logger.info(`PayPal order ${orderId} is already completed/captured`);
-        return {
-          data: {
-            ...input.data,
-            ...orderDetails,
-            status: PaymentSessionStatus.CAPTURED,
-            captured_at: orderDetails.purchaseUnits?.[0]?.payments?.captures?.[0]?.createTime || new Date().toISOString(),
-          },
-        };
+        const capture = orderDetails.purchaseUnits?.[0]?.payments?.captures?.[0];
+        if (capture) {
+          this.logger.info(`[PayPal Capture] Order ${orderId} is already completed/captured`);
+          this.logger.info(`[PayPal Capture] Capture ID: ${capture.id}, Amount: ${capture.amount?.value} ${capture.amount?.currencyCode}`);
+          return {
+            data: {
+              ...input.data,
+              ...orderDetails,
+              status: PaymentSessionStatus.CAPTURED,
+              captured_at: capture.createTime || new Date().toISOString(),
+              capture_id: capture.id,
+            },
+          };
+        }
       }
 
       // Check if order has authorization that needs to be captured
       const authorization = orderDetails.purchaseUnits?.[0]?.payments?.authorizations?.[0];
       
-      if (authorization && authorization.status === "CREATED") {
-        this.logger.info(`Capturing PayPal authorization ${authorization.id} for order ${orderId}`);
+      if (authorization) {
+        this.logger.info(`[PayPal Capture] Found authorization: ID=${authorization.id}, Status=${authorization.status}`);
         
-        // Use the captureOrder method which now properly handles authorizations
-        const capturedOrder = await this.client.captureOrder(orderId);
-        
-        return {
-          data: {
-            ...input.data,
-            ...capturedOrder,
-            status: PaymentSessionStatus.CAPTURED,
-            captured_at: capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0]?.createTime || new Date().toISOString(),
-          },
-        };
+        if (authorization.status === "CREATED") {
+          this.logger.info(`[PayPal Capture] Attempting to capture authorization ${authorization.id} for order ${orderId}`);
+          
+          try {
+            // Use the captureOrder method which now properly handles authorizations
+            const capturedOrder = await this.client.captureOrder(orderId);
+            
+            const newCapture = capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0];
+            if (newCapture) {
+              this.logger.info(`[PayPal Capture] Successfully captured! Capture ID: ${newCapture.id}`);
+              this.logger.info(`[PayPal Capture] Amount: ${newCapture.amount?.value} ${newCapture.amount?.currencyCode}`);
+              
+              return {
+                data: {
+                  ...input.data,
+                  ...capturedOrder,
+                  status: PaymentSessionStatus.CAPTURED,
+                  captured_at: newCapture.createTime || new Date().toISOString(),
+                  capture_id: newCapture.id,
+                },
+              };
+            } else {
+              this.logger.error(`[PayPal Capture] Capture succeeded but no capture data returned`);
+              throw new MedusaError(
+                MedusaError.Types.UNEXPECTED_STATE,
+                "PayPal capture succeeded but no capture data was returned"
+              );
+            }
+          } catch (captureError: any) {
+            this.logger.error(`[PayPal Capture] Failed to capture authorization:`, captureError);
+            throw new MedusaError(
+              MedusaError.Types.PAYMENT_AUTHORIZATION_ERROR,
+              `Failed to capture PayPal authorization: ${captureError.message}`
+            );
+          }
+        } else {
+          this.logger.warn(`[PayPal Capture] Authorization status is ${authorization.status}, cannot capture`);
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            `Cannot capture authorization in status ${authorization.status}`
+          );
+        }
       }
 
       // If status is APPROVED (but no authorization), try to capture directly
       if (orderDetails.status === "APPROVED") {
-        this.logger.info(`Capturing PayPal order ${orderId} directly`);
-        const capturedOrder = await this.client.captureOrder(orderId);
+        this.logger.info(`[PayPal Capture] Attempting direct capture for APPROVED order ${orderId}`);
         
-        return {
-          data: {
-            ...input.data,
-            ...capturedOrder,
-            status: PaymentSessionStatus.CAPTURED,
-            captured_at: capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0]?.createTime || new Date().toISOString(),
-          },
-        };
+        try {
+          const capturedOrder = await this.client.captureOrder(orderId);
+          
+          const capture = capturedOrder.purchaseUnits?.[0]?.payments?.captures?.[0];
+          if (capture) {
+            this.logger.info(`[PayPal Capture] Direct capture successful! Capture ID: ${capture.id}`);
+            return {
+              data: {
+                ...input.data,
+                ...capturedOrder,
+                status: PaymentSessionStatus.CAPTURED,
+                captured_at: capture.createTime || new Date().toISOString(),
+                capture_id: capture.id,
+              },
+            };
+          }
+        } catch (captureError: any) {
+          this.logger.error(`[PayPal Capture] Direct capture failed:`, captureError);
+          throw new MedusaError(
+            MedusaError.Types.PAYMENT_AUTHORIZATION_ERROR,
+            `Failed to capture PayPal order: ${captureError.message}`
+          );
+        }
       }
 
-      // If status is neither COMPLETED nor has authorization, throw error
-      throw new MedusaError(
-        MedusaError.Types.INVALID_DATA, 
-        `PayPal order ${orderId} is in status ${orderDetails.status} with no valid authorization, cannot capture`
-      );
+      // If we reach here, we cannot capture
+      const errorMsg = `Cannot capture PayPal order ${orderId} in status ${orderDetails.status} with intent ${orderDetails.intent}`;
+      this.logger.error(`[PayPal Capture] ${errorMsg}`);
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, errorMsg);
 
-    } catch (error) {
-      this.logger.error("PayPal capture payment error:", error);
-      throw new MedusaError(MedusaError.Types.INVALID_DATA, `Failed to capture PayPal payment: ${error.message}`);
+    } catch (error: any) {
+      this.logger.error("[PayPal Capture] Error in capturePayment:", error);
+      
+      // If it's already a MedusaError, re-throw it
+      if (error instanceof MedusaError) {
+        throw error;
+      }
+      
+      // Otherwise, wrap it
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE, 
+        `Failed to capture PayPal payment: ${error.message}`
+      );
     }
   }
   

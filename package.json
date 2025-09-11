@@ -1,6 +1,6 @@
 {
   "name": "medusa-paypal-authorize",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Medusa PayPal Plugin with Authorize Intent (Fork of @alphabite/medusa-paypal)",
   "author": "apiscerena",
   "license": "MIT",
@@ -43,7 +43,8 @@
   "scripts": {
     "build": "medusa plugin:build",
     "dev": "medusa plugin:develop",
-    "prepublishOnly": "medusa plugin:build"
+    "prepublishOnly": "medusa plugin:build",
+    "test:capture": "ts-node test-capture.ts"
   },
   "dependencies": {
     "@paypal/paypal-server-sdk": "1.0.0",
